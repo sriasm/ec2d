@@ -1,0 +1,310 @@
+---
+# Scope of work
+# 1. Provision a t2.micro instance, with an OS of your own choice.
+# 2. Change the security group of of the instance to ensure its security level.
+# 3. Change the OS/Firewall settings of the started instance to further enhance its security level.
+# 4. Install Docker CE.
+# 5. Deploy and start an nginx container in docker.
+# 6. Run a command to test the healthiness of the nginx container.
+# 7. Fetch the output of the nginx container’s default http page.
+# 8. Print out the word that occurs most on the page (exclude html tags).
+# 9. Logs the resource usage of the container every 10 seconds.
+# 10. Note #ssh-agent bash ; ssh-add /home/$USER/$USER.pem
+
+- name: DevTest EC2 creation and Docker Installation
+  hosts: localhost
+  gather_facts: False
+  user: ec2-user
+  connection: local
+  vars_files:
+   -  "{{ playbook_dir }}/vars/var.yml" #vars/var.yml
+
+# Task that will be used to Launch/Create an EC2 Instance
+  tasks:
+  - name: Create a security group {{ security_group }}
+    local_action:
+      module: ec2_group
+      name: "{{ security_group }}"
+      description: "Security Group for EC2 Server and changes the Security group rules"
+      region: "{{ region }}"
+      rules:
+        - proto: tcp
+          from_port: 22
+          to_port: 22
+          cidr_ip: 0.0.0.0/0
+        - proto: tcp
+          from_port: 80
+          to_port: 80
+          cidr_ip: 0.0.0.0/0
+        - proto: tcp
+          from_port: 443
+          to_port: 443
+          cidr_ip: 0.0.0.0/0
+        - proto: tcp
+          from_port: 3306
+          to_port: 3306
+          group_name: "{{ security_group }}" 
+        - proto: tcp
+          from_port: 22
+          to_port: 22
+          group_name: "{{ security_group }}"
+
+      rules_egress:
+        - proto: all
+          cidr_ip: 0.0.0.0/0
+    register: basic_firewall
+
+  - name: Launch the new EC2 Instance 
+    local_action: ec2
+      group={{ security_group }}
+      instance_type={{ instance_type}}
+      image={{ image }}
+      wait=true
+      region={{ region }}
+      keypair={{ keypair }}
+      count={{count}}
+    register: ec2
+
+  - name: Wait for SSH to come up 
+    wait_for:
+      host: "{{ item.public_ip }}"
+      port: 22
+      delay: 10
+      timeout: 60
+      state: started
+    with_items: "{{ ec2.instances }}"
+
+  - name: Capture the new IP as launched for dynamic processing
+    add_host:
+      hostname: "{{ item.public_ip }}"
+      groupname: launched
+    with_items: "{{ ec2.instances }}"
+
+  - name: Add the host key to known_hosts to avoid ssh waits
+    shell: ssh-keyscan -H "{{ item.public_ip }}" >> ~/.ssh/known_hosts
+    with_items: "{{ ec2.instances }}"
+
+  - name: Add tag to Instance(s)
+    local_action: ec2_tag resource={{ item.id }} region={{ region }} state=present
+    with_items: "{{ ec2.instances }}"
+    args:
+      tags:
+        Name: SriniTestServer
+
+#
+# Install Docker and add docker group, add user to group
+#
+
+- name: "Install Docker e"
+  hosts: launched
+  remote_user: ec2-user # Remote user
+  become: yes
+  gather_facts: false
+  vars:
+    service_name: docker
+    python_pip: python-pip
+    docker_group: docker
+    docker_remote_app_dir: /tmp/helloworld
+    remote_user: ec2-user
+
+  tasks:
+  - name: Add Docker repo
+    get_url:
+      url: https://download.docker.com/linux/centos/docker-ce.repo
+      dest: /etc/yum.repos.d/docer-ce.repo
+    become: yes
+
+  - name: Enable Docker Edge repo
+    ini_file:
+      dest: /etc/yum.repos.d/docer-ce.repo
+      section: 'docker-ce-edge'
+      option: enabled
+      value: 0
+    become: yes
+
+  - name: Installing Docker
+    yum: 
+     name: "{{ item }}"
+     state: latest
+    with_items:
+     - docker
+     - python-pip
+    tags:
+     - docker
+    notify: Start docker on boot
+
+  - name: Create "docker" group
+    group:
+     name: "{{ docker_group }}"
+     state: present
+    tags:
+     - docker
+
+  # sudo usermod -aG docker ubuntu
+  - name: Add remote "ec2-user" user to "docker" group
+    user:
+     name: "{{ remote_user }}"
+     group: "{{ docker_group }}"
+     append: yes
+    tags:
+     - docker
+
+  - name: Install docker-compose
+    get_url:
+      url: https://github.com/docker/compose/releases/download/1.20.1/docker-compose-Linux-x86_64
+      dest: /usr/bin/docker-compose
+      mode: 0755
+    tags:
+     - docker
+
+  handlers:
+  # sudo systemctl enable docker
+  - name: Start docker on boot
+    service:
+     name: docker
+     state: started
+     enabled: yes
+
+#
+# Install nginx using docker compose 
+#
+
+- name: "Install nginx  Docker machine"
+  hosts: launched
+  remote_user: ec2-user # Remote user
+  become: yes
+  gather_facts: false
+  vars:
+   service_name: docker
+   python_pip: python-pip
+   docker_group: docker
+   remote_user: ec2-user
+   docker_remote_app_dir: /tmp/helloworld
+   nginxipport: "192.168.0.20:80"
+
+  tasks:
+  - name: Copy "ngnix" application folder across EC2
+    copy:
+      src: "{{ playbook_dir }}/nginx/"
+      dest: "{{ docker_remote_app_dir }}"
+    tags:
+     - nginx
+ 
+  # cd /tmp/helloworld/ && docker-compose up -d --build
+  - name: Rebuild images defined in compose file and restart containers whose images have changed
+    command: docker-compose up -d --build    #using ".env" file on/tmp/helloworld ( from playbook_dir }}/nginx/.env)  folder tp provide the netwok name
+    args:
+      chdir: "{{ docker_remote_app_dir }}"
+    tags:
+    - nginx
+
+  - name: Get status of nginx container
+    get_url:
+      url: http://{{nginxipport}} # use nginx in IP/PORT
+      dest: /tmp/file.txt
+      mode: 0777
+      force: yes
+    register: nginxout
+  - debug:
+      msg: the status code is {{ nginxout.status_code }}
+
+  - name: Print out the word that occurs most on the page (exclude html tags).
+    shell: |
+        sed -e 's/[^[:alpha:]]/ /g' /tmp/file.txt | tr '\n' " " |  tr -s " " | tr " " '\n'| tr 'A-Z' 'a-z' |
+        sort | uniq -c | sort -nr | head -n 1
+    register: curlout
+
+  - debug:
+      msg: The word repeated times and the word  '{{ curlout.stdout }}.'
+
+#
+# Enable the docker container nginx resource  log basicall docker -stats IMAGEID
+#
+#
+- name: "Enable the  log for container"
+  hosts: launched
+  remote_user: ec2-user # Remote user
+  become: yes
+  gather_facts: false
+  vars:
+   service_name: docker
+   docker_group: docker
+
+  tasks:
+  - name: Install SSM  and amazon-cloudwatch-agent to enable Cloudwatch agent
+    yum:
+      name: "{{ item }}"
+      state: present
+    with_items:
+    - https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_amd64/amazon-ssm-agent.rpm
+    - https://s3.amazonaws.com/amazoncloudwatch-agent/amazon_linux/amd64/latest/amazon-cloudwatch-agent.rpm
+
+  - name: Create directory if they don't exist 
+    file:
+      path: "{{ item }}"
+      state: directory
+      owner: root
+      group: root
+      mode: 0775
+    with_items:
+    - /etc/init/
+    - /opt/aws/amazon-cloudwatch-agent/bin/
+
+
+  - name: Copy proxy  configuration
+    copy:
+      src: "{{ playbook_dir }}/files/amazon-ssm-agent.override"
+      dest: "/etc/init/override.conf"
+
+  - name: Copy global configuration json its created fisrt time using /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-config-wizard
+    copy:
+      src: "{{ playbook_dir }}/files/config.json"
+      dest: "/opt/aws/amazon-cloudwatch-agent/bin/config.json"
+    notify: restart amazon-ssm-agent
+
+  - name: Enable amazon-ssm-agent
+    service:
+      name: amazon-ssm-agent
+      state: started
+      enabled: yes
+
+  - name: Copy global configuration json its created fisrt time using /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-config-wizard
+    copy:
+      src: "{{ playbook_dir }}/files/config.json"
+      dest: "/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json"
+    notify: restart amazon-cloudwatch-agent
+
+  - name: Enable amazon-cloudwatch-agent
+    service:
+      name: amazon-cloudwatch-agent
+      state: started
+      enabled: yes
+
+  - name: Copy status.sh to ec2-user folder to get the logs , The script to run "docker ps -q | xargs  docker stats "
+    copy:
+      src: "{{ playbook_dir }}/files/status.sh"
+      dest: "/home/ec2-user/"
+      owner: ec2-user
+      mode: 0755
+      group: docker
+      force: yes
+
+  # Creates a cron file under /etc/cron.d  to run {{ playbook_dir }}/status.sh for each 10 secs, it can be diverted anywhere.
+  - cron:
+      name: "Check Container nginx status every 10 seconds"
+      user: ec2-user
+      job: "sleep 10; /home/ec2-user/status.sh > /dev/null"
+
+  handlers:
+  - name: restart amazon-ssm-agent
+    service:
+      name: amazon-ssm-agent
+      state: restarted
+  - name: restart amazon-cloudwatch-agent
+    service:
+      name: amazon-cloudwatch-agent
+      state: restarted
+
+  - debug:
+      msg: This is end of playbook!!!!  # THE END
+

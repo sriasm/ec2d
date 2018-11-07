@@ -1,0 +1,26 @@
+{
+	"logs": {
+		"logs_collected": {
+			"files": {
+				"collect_list": [
+					{
+						"file_path": "/home/ec2-user/status.log",
+						"log_group_name": "status.log"
+					}
+				]
+			}
+		}
+	},
+	"metrics": {
+		"metrics_collected": {
+			"collectd": {
+				"metrics_aggregation_interval": 10
+			},
+			"statsd": {
+				"metrics_aggregation_interval": 10,
+				"metrics_collection_interval": 10,
+				"service_address": ":8125"
+			}
+		}
+	}
+}

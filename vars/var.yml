@@ -1,0 +1,8 @@
+---
+instance_type: t2.micro
+security_group: srini_devtest # Change the security group name here
+image: ami-013be31976ca2c322 # TRed Hat Enterprise Linux 7.5 (HVM), SSD Volume Type - ami-6871a115
+keypair: ec2-user # Initial key that i created on my name
+region: us-east-1 # Region that i created mu account
+count: 1
+
